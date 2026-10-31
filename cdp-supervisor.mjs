@@ -249,38 +249,40 @@ function isCandidateScriptUrl(value) {
   }
 }
 
-async function waitForQuotaScript(session, gateApi, timeoutMs = 20000) {
+async function collectQuotaScripts(session, gateApi, timeoutMs = 20000, quietMs = 2000) {
+  const found = [];
+  let lastFoundAt = 0;
   let removeHandler = null;
-  let settled = false;
+  const deadline = Date.now() + timeoutMs;
+  const addCandidate = (params) => {
+    if (!params.scriptId || !isCandidateScriptUrl(params.url)) return;
+    if (found.some((item) => item.url === params.url)) return;
+    void (async () => {
+      try {
+        const sourceResult = await session.send("Debugger.getScriptSource", { scriptId: params.scriptId }, 15000);
+        const source = sourceResult.scriptSource;
+        if (typeof source !== "string" || source.length === 0) return;
+        const location = gateApi.locate(source, params.url);
+        const condition = location && gateApi.condition(location);
+        if (!location || !condition) return;
+        if (found.some((item) => item.url === params.url)) return;
+        found.push({ scriptId: params.scriptId, url: params.url, location, condition });
+        lastFoundAt = Date.now();
+      } catch {}
+    })();
+  };
   try {
-    const scriptPromise = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(new Error("quota bundle discovery timed out"));
-      }, timeoutMs);
-      removeHandler = session.on("Debugger.scriptParsed", (params) => {
-        if (settled || !params.scriptId || !isCandidateScriptUrl(params.url)) return;
-        void (async () => {
-          try {
-            const sourceResult = await session.send("Debugger.getScriptSource", { scriptId: params.scriptId }, 15000);
-            const source = sourceResult.scriptSource;
-            if (typeof source !== "string" || source.length === 0) return;
-            const location = gateApi.locate(source, params.url);
-            const condition = gateApi.condition(location);
-            if (!location || !condition || settled) return;
-            settled = true;
-            clearTimeout(timer);
-            resolve({ scriptId: params.scriptId, url: params.url, location, condition });
-          } catch {}
-        })();
-      });
-    });
     await session.send("Debugger.enable", {}, timeoutMs);
-    return await scriptPromise;
+    removeHandler = session.on("Debugger.scriptParsed", addCandidate);
+    while (Date.now() < deadline) {
+      if (found.length > 0 && Date.now() - lastFoundAt >= quietMs) break;
+      await sleep(100);
+    }
   } finally {
     removeHandler?.();
   }
+  if (found.length === 0) throw new Error("quota bundle discovery timed out");
+  return found;
 }
 
 async function resolveBreakpointLocation(session, scriptId, desired) {
@@ -332,30 +334,42 @@ async function resolveBreakpointLocation(session, scriptId, desired) {
 
 async function superviseTarget(target, gateSource, gateApi, port, onReady) {
   const session = new CdpSession(target.webSocketDebuggerUrl);
-  let breakpointId = null;
+  const breakpointIds = [];
   let documentScriptId = null;
   let removeReloadHandler = null;
   try {
     await session.connect();
-    const script = await waitForQuotaScript(session, gateApi);
-    const breakpoint = { ...script.location, condition: script.condition };
-    const bootstrap = buildBootstrap(breakpoint, script.url);
+    const scripts = await collectQuotaScripts(session, gateApi);
+    const breakpoint = { ...scripts[0].location, condition: scripts[0].condition };
+    const bootstrap = buildBootstrap(breakpoint, scripts[0].url);
     documentScriptId = await installScripts(session, `${gateSource}\n${bootstrap}`);
-    const actualLocation = await resolveBreakpointLocation(session, script.scriptId, breakpoint);
-    const armed = await session.send("Debugger.setBreakpoint", {
-      location: actualLocation,
-      condition: breakpoint.condition,
-    });
-    breakpointId = armed.breakpointId;
-    if (!breakpointId || !armed.actualLocation) throw new Error("Debugger.setBreakpoint did not resolve an actual location");
+    const patches = [];
+    for (const script of scripts) {
+      const actualLocation = await resolveBreakpointLocation(session, script.scriptId, script.location);
+      const armed = await session.send("Debugger.setBreakpoint", {
+        location: actualLocation,
+        condition: script.condition,
+      });
+      if (!armed.breakpointId || !armed.actualLocation) throw new Error("Debugger.setBreakpoint did not resolve an actual location");
+      breakpointIds.push(armed.breakpointId);
+      patches.push({
+        bundleUrl: script.url,
+        mode: script.location.mode,
+        condition: script.condition,
+        breakpointId: armed.breakpointId,
+        requestedLocation: { lineNumber: script.location.lineNumber, columnNumber: script.location.columnNumber },
+        actualLocation: armed.actualLocation,
+      });
+    }
     const readyDetails = {
       port,
       targetId: target.id,
       targetUrl: target.url,
-      bundleUrl: script.url,
-      breakpointId,
-      requestedLocation: { lineNumber: breakpoint.lineNumber, columnNumber: breakpoint.columnNumber },
-      actualLocation: armed.actualLocation,
+      bundleUrl: scripts[0].url,
+      breakpointId: breakpointIds[0],
+      requestedLocation: patches[0].requestedLocation,
+      actualLocation: patches[0].actualLocation,
+      patches,
     };
     status("ready", readyDetails);
     onReady?.();
@@ -371,7 +385,7 @@ async function superviseTarget(target, gateSource, gateApi, port, onReady) {
     }
   } finally {
     removeReloadHandler?.();
-    if (breakpointId) {
+    for (const breakpointId of breakpointIds) {
       try { await session.send("Debugger.removeBreakpoint", { breakpointId }, 2000); } catch {}
     }
     if (documentScriptId) {

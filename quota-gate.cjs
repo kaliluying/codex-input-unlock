@@ -129,9 +129,37 @@
     );
   }
 
+  // Current builds (26.1027+) centralise the block in the rate-limit state
+  // builder: `sendBlockReason:d?.block_reason??null,sendBlocked:d!=null`.
+  function locateRateLimitState(source, sourceUrl) {
+    const statePattern = new RegExp(
+      `sendBlockReason:(${identifier})\\?\\.block_reason\\?\\?null,sendBlocked:\\1!=null`,
+      "g",
+    );
+    const states = [...source.matchAll(statePattern)];
+    if (states.length !== 1) return null;
+    const state = states[0];
+    const quota = state[1];
+    const absoluteOffset = state.index + "sendBlockReason:".length;
+    return sourceLocation(source, sourceUrl, absoluteOffset, quota, null, "codex-rate-limit-state");
+  }
+
+  // Derived "usage limit" store selector: `X=z(Z,({get:e})=>{let t=e(A),n=e(B).data;
+  // if(t.authMethod!==`chatgpt`||...||n.rate_limit?.allowed!==!1||...)`.
+  function locateRateLimitDerived(source, sourceUrl, atomIndex) {
+    const tail = source.slice(atomIndex, atomIndex + 4000);
+    const guard = new RegExp(`;if\\((${identifier})\\.authMethod!==\\\`chatgpt\\\``).exec(tail);
+    if (!guard) return null;
+    const absoluteOffset = atomIndex + guard.index + ";if(".length;
+    return sourceLocation(source, sourceUrl, absoluteOffset, guard[1], null, "codex-rate-limit-derived");
+  }
+
   function locate(source, sourceUrl) {
     if (typeof source !== "string" || source.length === 0) return null;
     if (typeof sourceUrl !== "string" || sourceUrl.length === 0) return null;
+
+    const stateLocation = locateRateLimitState(source, sourceUrl);
+    if (stateLocation) return stateLocation;
 
     const atomPattern = new RegExp(
       `(${identifier})=${identifier}\\(${identifier},\\(\\{get:${identifier}\\}\\)=>\\{[^}]{0,1400}?\\.authMethod!==\\\`chatgpt\\\`[^}]{0,1400}?\\.rate_limit\\?\\.allowed!==!1`,
@@ -141,7 +169,8 @@
     if (atoms.length !== 1) return null;
     return locateCodexLocalQuota(source, sourceUrl, atoms[0][1])
       || locateLegacy(source, sourceUrl, atoms[0][1])
-      || locateModern(source, sourceUrl, atoms[0][1]);
+      || locateModern(source, sourceUrl, atoms[0][1])
+      || locateRateLimitDerived(source, sourceUrl, atoms[0].index);
   }
 
   function condition(location) {
@@ -150,6 +179,12 @@
     const quota = location.quotaVariable;
     if (location.mode === "codex-local-quota" || location.mode === "legacy-local-host") {
       return `(${quota}=false,false)`;
+    }
+    if (location.mode === "codex-rate-limit-state") {
+      return `(${quota}=null,false)`;
+    }
+    if (location.mode === "codex-rate-limit-derived") {
+      return `(${quota}={},false)`;
     }
     if (location.mode === "third-party-composer-dual") {
       if (!safeIdentifier.test(location.conversationQuotaVariable || "")) return null;

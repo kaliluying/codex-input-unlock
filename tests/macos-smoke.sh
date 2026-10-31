@@ -31,5 +31,23 @@ const previousCodexBundle = currentCodexBundle.replace(
 );
 const previousLocation = gate.locate(previousCodexBundle, "app://-/assets/app-primary-previous.js");
 assert.equal(previousLocation?.mode, "codex-local-quota");
+
+const rateLimitStateBundle = [
+  "function VF(e,t){let o=WF(e,t),l=o?.blocked_features?.filter(e=>e.name===`send`),d=l?.find(...)??null;return{",
+  "sendBlockReason:d?.block_reason??null,sendBlocked:d!=null}}",
+].join("");
+const stateLocation = gate.locate(rateLimitStateBundle, "app://-/assets/app-initial-next.js");
+assert.equal(stateLocation?.mode, "codex-rate-limit-state");
+assert.equal(stateLocation?.quotaVariable, "d");
+assert.equal(gate.condition(stateLocation), "(d=null,false)");
+
+const derivedBundle = [
+  "lV=z(Z,({get:e})=>{let t=e(Xb),n=e(Nb).data;",
+  "if(t.authMethod!==`chatgpt`||n.rate_limit?.allowed!==!1)return!1;return!0})",
+].join("");
+const derivedLocation = gate.locate(derivedBundle, "app://-/assets/app-primary-next.js");
+assert.equal(derivedLocation?.mode, "codex-rate-limit-derived");
+assert.equal(derivedLocation?.quotaVariable, "t");
+assert.equal(gate.condition(derivedLocation), "(t={},false)");
 NODE
 echo 'macOS static smoke checks passed'
