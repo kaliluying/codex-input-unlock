@@ -252,36 +252,58 @@ function isCandidateScriptUrl(value) {
 async function collectQuotaScripts(session, gateApi, timeoutMs = 20000, quietMs = 2000) {
   const found = [];
   let lastFoundAt = 0;
+  let parsedScripts = 0;
+  let candidateScripts = 0;
+  let pendingCandidates = 0;
+  let lastProbe = null;
   let removeHandler = null;
   const deadline = Date.now() + timeoutMs;
   const addCandidate = (params) => {
+    parsedScripts += 1;
     if (!params.scriptId || !isCandidateScriptUrl(params.url)) return;
+    candidateScripts += 1;
     if (found.some((item) => item.url === params.url)) return;
+    pendingCandidates += 1;
     void (async () => {
       try {
         const sourceResult = await session.send("Debugger.getScriptSource", { scriptId: params.scriptId }, 15000);
         const source = sourceResult.scriptSource;
         if (typeof source !== "string" || source.length === 0) return;
-        const location = gateApi.locate(source, params.url);
-        const condition = location && gateApi.condition(location);
-        if (!location || !condition) return;
+        let breakpoints = [];
+        if (typeof gateApi.locateAll === "function") {
+          breakpoints = gateApi.locateAll(source, params.url).slice(0, 4);
+        } else {
+          const location = gateApi.locate(source, params.url);
+          const condition = gateApi.condition(location);
+          if (location && condition) breakpoints = [{ location, condition }];
+        }
+        if (breakpoints.length === 0) {
+          if (typeof gateApi.explain === "function") {
+            try { lastProbe = { url: params.url, ...gateApi.explain(source, params.url) }; } catch {}
+          }
+          return;
+        }
         if (found.some((item) => item.url === params.url)) return;
-        found.push({ scriptId: params.scriptId, url: params.url, location, condition });
+        found.push({ scriptId: params.scriptId, url: params.url, breakpoints });
         lastFoundAt = Date.now();
       } catch {}
+      finally { pendingCandidates -= 1; }
     })();
   };
   try {
-    await session.send("Debugger.enable", {}, timeoutMs);
     removeHandler = session.on("Debugger.scriptParsed", addCandidate);
+    await session.send("Debugger.enable", {}, timeoutMs);
     while (Date.now() < deadline) {
-      if (found.length > 0 && Date.now() - lastFoundAt >= quietMs) break;
+      if (found.length > 0 && pendingCandidates === 0 && Date.now() - lastFoundAt >= quietMs) break;
       await sleep(100);
     }
   } finally {
     removeHandler?.();
   }
-  if (found.length === 0) throw new Error("quota bundle discovery timed out");
+  if (found.length === 0) {
+    const detail = JSON.stringify({ parsedScripts, candidateScripts, lastProbe });
+    throw new Error(`quota bundle discovery timed out (${detail})`);
+  }
   return found;
 }
 
@@ -334,42 +356,51 @@ async function resolveBreakpointLocation(session, scriptId, desired) {
 
 async function superviseTarget(target, gateSource, gateApi, port, onReady) {
   const session = new CdpSession(target.webSocketDebuggerUrl);
-  const breakpointIds = [];
+  const armedBreakpoints = [];
   let documentScriptId = null;
   let removeReloadHandler = null;
   try {
     await session.connect();
     const scripts = await collectQuotaScripts(session, gateApi);
-    const breakpoint = { ...scripts[0].location, condition: scripts[0].condition };
-    const bootstrap = buildBootstrap(breakpoint, scripts[0].url);
+    const firstBreakpoint = scripts[0].breakpoints[0];
+    const bootstrap = buildBootstrap({ ...firstBreakpoint.location, condition: firstBreakpoint.condition }, scripts[0].url);
     documentScriptId = await installScripts(session, `${gateSource}\n${bootstrap}`);
     const patches = [];
     for (const script of scripts) {
-      const actualLocation = await resolveBreakpointLocation(session, script.scriptId, script.location);
-      const armed = await session.send("Debugger.setBreakpoint", {
-        location: actualLocation,
-        condition: script.condition,
-      });
-      if (!armed.breakpointId || !armed.actualLocation) throw new Error("Debugger.setBreakpoint did not resolve an actual location");
-      breakpointIds.push(armed.breakpointId);
-      patches.push({
-        bundleUrl: script.url,
-        mode: script.location.mode,
-        condition: script.condition,
-        breakpointId: armed.breakpointId,
-        requestedLocation: { lineNumber: script.location.lineNumber, columnNumber: script.location.columnNumber },
-        actualLocation: armed.actualLocation,
-      });
+      for (const candidate of script.breakpoints) {
+        try {
+          const actualLocation = await resolveBreakpointLocation(session, script.scriptId, candidate.location);
+          const armed = await session.send("Debugger.setBreakpoint", {
+            location: actualLocation,
+            condition: candidate.condition,
+          });
+          if (!armed.breakpointId || !armed.actualLocation) continue;
+          armedBreakpoints.push({
+            bundleUrl: script.url,
+            mode: candidate.location.mode,
+            condition: candidate.condition,
+            breakpointId: armed.breakpointId,
+            requestedLocation: { lineNumber: candidate.location.lineNumber, columnNumber: candidate.location.columnNumber },
+            actualLocation: armed.actualLocation,
+          });
+          patches.push(armedBreakpoints.at(-1));
+        } catch (error) {
+          process.stderr.write(`[skip-breakpoint] ${candidate.location.mode}: ${error.message}\n`);
+        }
+      }
     }
+    if (armedBreakpoints.length === 0) throw new Error("Debugger.setBreakpoint did not resolve an actual location");
+    const armedPrimary = armedBreakpoints[0];
     const readyDetails = {
       port,
       targetId: target.id,
       targetUrl: target.url,
-      bundleUrl: scripts[0].url,
-      breakpointId: breakpointIds[0],
-      requestedLocation: patches[0].requestedLocation,
-      actualLocation: patches[0].actualLocation,
+      bundleUrl: armedPrimary.bundleUrl,
+      breakpointId: armedPrimary.breakpointId,
+      requestedLocation: armedPrimary.requestedLocation,
+      actualLocation: armedPrimary.actualLocation,
       patches,
+      breakpoints: armedBreakpoints,
     };
     status("ready", readyDetails);
     onReady?.();
@@ -379,14 +410,14 @@ async function superviseTarget(target, gateSource, gateApi, port, onReady) {
     while (true) {
       await sleep(2000);
       if (reloadDetected) return;
-      const alive = await session.evaluate("Boolean(globalThis.__codexExternalQuotaGate && (globalThis.__codexInputUnlockState?.breakpoint || globalThis.__codexExternalPatchState?.breakpoint))");
-      if (alive !== true) return;
-      status("ready", readyDetails);
+      const probe = await session.evaluate("(() => ({ alive: Boolean(globalThis.__codexExternalQuotaGate && (globalThis.__codexInputUnlockState?.breakpoint || globalThis.__codexExternalPatchState?.breakpoint)), stats: globalThis.__codexExternalQuotaGate?.stats ?? null }))()");
+      if (probe?.alive !== true) return;
+      status("ready", { ...readyDetails, gateStats: probe.stats });
     }
   } finally {
     removeReloadHandler?.();
-    for (const breakpointId of breakpointIds) {
-      try { await session.send("Debugger.removeBreakpoint", { breakpointId }, 2000); } catch {}
+    for (const armed of armedBreakpoints) {
+      try { await session.send("Debugger.removeBreakpoint", { breakpointId: armed.breakpointId }, 2000); } catch {}
     }
     if (documentScriptId) {
       try {
@@ -408,8 +439,11 @@ async function selfTest() {
   const sourceUrl = `app://-/assets/${path.basename(bundlePath)}`;
   const location = gate.locate(source, sourceUrl);
   const condition = gate.condition(location);
-  if (!location || !condition) throw new Error("quota gate did not uniquely locate the current bundle");
-  process.stdout.write(`${JSON.stringify({ ok: true, location, condition })}\n`);
+  const explain = typeof gate.explain === "function" ? gate.explain(source, sourceUrl) : null;
+  if (!location || !condition) {
+    throw new Error(`quota gate did not uniquely locate the current bundle: ${JSON.stringify(explain)}`);
+  }
+  process.stdout.write(`${JSON.stringify({ ok: true, location, condition, explain })}\n`);
 }
 
 async function main() {

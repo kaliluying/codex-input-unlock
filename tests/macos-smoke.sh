@@ -49,5 +49,13 @@ const derivedLocation = gate.locate(derivedBundle, "app://-/assets/app-primary-n
 assert.equal(derivedLocation?.mode, "codex-rate-limit-derived");
 assert.equal(derivedLocation?.quotaVariable, "t");
 assert.equal(gate.condition(derivedLocation), "(t={},false)");
+
+const atomGuardBundle = [
+  "XP=Xl(K,({get:e})=>{let t=e(Ey),n=e(ly).data;if(t.authMethod!==`chatgpt`||n.rate_limit?.allowed!==!1)return!1;return!0})",
+].join("");
+const atomGuard = gate.locateAll(atomGuardBundle, "app://-/assets/app-primary-atom.js")
+  .find((entry) => entry.location.mode === "quota-atom-data");
+assert.equal(atomGuard?.location.quotaVariable, "n");
+assert.equal(atomGuard?.condition, "(__codexExternalQuotaGate.unlock(n),false)");
 NODE
 echo 'macOS static smoke checks passed'
