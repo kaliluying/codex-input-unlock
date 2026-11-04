@@ -28,6 +28,10 @@ find_app() {
   die 'Codex.app or ChatGPT.app was not found. Set CODEX_APP_PATH to its path.'
 }
 
+app_running() {
+  ps -axo command= | "$node_bin" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.exit(s.includes(process.argv[1]+"/Contents/MacOS/")?0:1))' "$1"
+}
+
 read_state() {
   [[ -f "$STATE_FILE" ]] || die 'Not installed; run this script with install first.'
   "$node_bin" -e 'const s=require(process.argv[1]); process.stdout.write(JSON.stringify(s))' "$STATE_FILE"
@@ -63,12 +67,26 @@ case "$ACTION" in
     executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist" 2>/dev/null)" || die "Cannot read executable from $app"
     app_bin="$app/Contents/MacOS/$executable"
     [[ -x "$app_bin" ]] || die "App executable not found: $app_bin"
-    if ps -axo command= | "$node_bin" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.exit(s.includes(process.argv[1]+"/Contents/MacOS/")?0:1))' "$app"; then
+    if app_running "$app"; then
       if bash "$0" verify >/dev/null 2>&1; then
         echo 'Codex/ChatGPT is already running with input unlock active.'
         exit 0
       fi
-      die 'Codex/ChatGPT is already running. Quit it fully, then launch through this script.'
+      if [[ ! -t 0 ]]; then
+        die 'Codex/ChatGPT is already running. Quit it fully, then launch through this script.'
+      fi
+      answer=''
+      read -r -p 'ChatGPT 正在运行但未启用输入解锁。退出并重新启动？[y/N] ' answer || true
+      [[ "$answer" =~ ^[Yy]$ ]] || die 'Cancelled; quit Codex/ChatGPT fully, then launch through this script.'
+      echo '正在退出 ChatGPT…'
+      osascript -e 'tell application id "com.openai.codex" to quit' >/dev/null 2>&1 || true
+      for _ in {1..40}; do
+        app_running "$app" || break
+        sleep 0.25
+      done
+      if app_running "$app"; then
+        die 'ChatGPT did not quit. Quit it fully, then launch through this script.'
+      fi
     fi
     port="$("$node_bin" -e 'require("net").createServer().listen(0,"127.0.0.1",function(){console.log(this.address().port);this.close()})')"
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"

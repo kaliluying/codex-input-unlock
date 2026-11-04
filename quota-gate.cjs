@@ -154,6 +154,19 @@
     return sourceLocation(source, sourceUrl, absoluteOffset, guard[1], null, "codex-rate-limit-derived");
   }
 
+  // Current builds (26.1029+) emit the guard as `if("chatgpt"!==t.authMethod...)`.
+  function locateRateLimitDerivedV2(source, sourceUrl) {
+    const pattern = new RegExp(
+      `(${identifier})=\\(0,${identifier}\\.un\\)\\(${identifier}\\.u,\\(\\{get:${identifier}\\}\\)=>\\{[^}]{0,800}?if\\(\\"chatgpt\\"!==(${identifier})\\.authMethod[^}]{0,2000}?\\.rate_limit\\?\\.allowed!==!1`,
+      "g",
+    );
+    const matches = [...source.matchAll(pattern)];
+    if (matches.length !== 1) return null;
+    const match = matches[0];
+    const absoluteOffset = match.index + match[0].indexOf("if(") + "if(".length;
+    return sourceLocation(source, sourceUrl, absoluteOffset, match[2], null, "codex-rate-limit-derived-v2");
+  }
+
   function locateComposerQuotaConsumer(source, sourceUrl, atomVariable) {
     const readPattern = new RegExp(
       `(${identifier})=${identifier}\\(${identifier}\\?${escapeRegex(atomVariable)}:(?:!1|false)\\)`,
@@ -286,6 +299,8 @@
     if (typeof sourceUrl !== "string" || sourceUrl.length === 0) return [];
     const stateLocation = locateRateLimitState(source, sourceUrl);
     if (stateLocation) return [{ location: stateLocation, condition: conditionForLocation(stateLocation) }];
+    const derivedV2Location = locateRateLimitDerivedV2(source, sourceUrl);
+    if (derivedV2Location) return [{ location: derivedV2Location, condition: conditionForLocation(derivedV2Location) }];
     const atoms = [...source.matchAll(atomPattern())];
     if (atoms.length !== 1) return [];
     const atomVariable = atoms[0][1];
@@ -380,7 +395,10 @@
     if (location.mode === "codex-rate-limit-state") {
       return `(${quota}=null,false)`;
     }
-    if (location.mode === "codex-rate-limit-derived") {
+    if (
+      location.mode === "codex-rate-limit-derived"
+      || location.mode === "codex-rate-limit-derived-v2"
+    ) {
       return `(${quota}={},false)`;
     }
     if (location.mode === "quota-atom-data") {

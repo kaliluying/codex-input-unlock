@@ -11,10 +11,8 @@ pause_on_error() {
   exit "$code"
 }
 
-if [[ ! -f "$ENTRY" ]]; then
-  echo '首次运行：正在安装启动所需文件…'
-  bash "$ROOT/macos/codex-input-unlock-macos.sh" install || pause_on_error "$?"
-fi
+echo '正在安装/更新启动所需文件…'
+bash "$ROOT/macos/codex-input-unlock-macos.sh" install || pause_on_error "$?"
 
 echo '正在启动 Codex…'
 bash "$ENTRY" launch || pause_on_error "$?"

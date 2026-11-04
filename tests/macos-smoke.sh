@@ -50,6 +50,16 @@ assert.equal(derivedLocation?.mode, "codex-rate-limit-derived");
 assert.equal(derivedLocation?.quotaVariable, "t");
 assert.equal(gate.condition(derivedLocation), "(t={},false)");
 
+const derivedV2Bundle = [
+  "a6kU(e,t,n){var a=n(`y5DF`),i=n(`SPnB`);",
+  "let c=(0,a.un)(i.u,({get:e})=>{let t=e(i.PO),n=e(d.Ix).data;",
+  'if("chatgpt"!==t.authMethod||t.authLoading||n.rate_limit?.allowed!==!1)return!1;return!0})}',
+].join("");
+const derivedV2Location = gate.locate(derivedV2Bundle, "app://-/webview/assets/async/465814.879bc2db3c.js");
+assert.equal(derivedV2Location?.mode, "codex-rate-limit-derived-v2");
+assert.equal(derivedV2Location?.quotaVariable, "t");
+assert.equal(gate.condition(derivedV2Location), "(t={},false)");
+
 const atomGuardBundle = [
   "XP=Xl(K,({get:e})=>{let t=e(Ey),n=e(ly).data;if(t.authMethod!==`chatgpt`||n.rate_limit?.allowed!==!1)return!1;return!0})",
 ].join("");
