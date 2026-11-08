@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,8 @@ import (
 	"time"
 	"unicode/utf16"
 )
+
+var appVersion = "1.0.0"
 
 // ============================================================================
 // 1. 配额门禁数据结构与核心模式匹配引擎 (Quota Gate Models & Matching)
@@ -1676,6 +1679,8 @@ func runSelfTest(bundlePath, gatePath string) error {
 
 // runLaunch 拉起桌面客户端并开启 CDP 守护进程（前台终端运行模式）
 func runLaunch(gatePath, statusPath string, debugPort int, startupTimeoutSec int, killExisting bool) error {
+	triggerBackgroundUpdateCheck()
+
 	appPath, err := findAppPath()
 	if err != nil {
 		return err
@@ -1901,6 +1906,200 @@ func runVerify(port int, statusPath string) error {
 }
 
 // ============================================================================
+// 5.5. 智能在线自更新机制 (Auto Update & Version Management)
+// ============================================================================
+
+// isNewerVersion 比较语义化版本号，判断 remote 是否高于 local (支持 v1.0.1 或 1.0.1 格式)
+func isNewerVersion(remote, local string) bool {
+	clean := func(v string) []int {
+		v = strings.TrimSpace(strings.TrimPrefix(v, "v"))
+		parts := strings.Split(v, "-")[0] // 剥离预发布标签如 -rc1
+		segs := strings.Split(parts, ".")
+		nums := make([]int, len(segs))
+		for i, s := range segs {
+			n, _ := strconv.Atoi(s)
+			nums[i] = n
+		}
+		return nums
+	}
+	rNums := clean(remote)
+	lNums := clean(local)
+	maxLen := len(rNums)
+	if len(lNums) > maxLen {
+		maxLen = len(lNums)
+	}
+	for i := 0; i < maxLen; i++ {
+		rVal := 0
+		if i < len(rNums) {
+			rVal = rNums[i]
+		}
+		lVal := 0
+		if i < len(lNums) {
+			lVal = lNums[i]
+		}
+		if rVal > lVal {
+			return true
+		} else if rVal < lVal {
+			return false
+		}
+	}
+	return false
+}
+
+// fetchLatestReleaseTag 请求 GitHub 最新 Release 重定向，无额度限制地快速获取最新 Tag 名称
+func fetchLatestReleaseTag(repo string, timeout time.Duration) (string, error) {
+	client := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// 拦截 302 重定向，直接从 Location 响应头中读取重定向的目标 Release Tag
+			return http.ErrUseLastResponse
+		},
+	}
+	url := fmt.Sprintf("https://github.com/%s/releases/latest", repo)
+	resp, err := client.Head(url)
+	if err != nil {
+		resp, err = client.Get(url)
+		if err != nil {
+			return "", err
+		}
+	}
+	defer resp.Body.Close()
+
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		return "", errors.New("no redirect location found in latest release")
+	}
+	parts := strings.Split(strings.TrimRight(loc, "/"), "/")
+	tag := parts[len(parts)-1]
+	if tag == "" || tag == "latest" {
+		return "", fmt.Errorf("unexpected release redirect destination: %s", loc)
+	}
+	return tag, nil
+}
+
+// downloadAndApplyUpdate 下载目标版本的可执行二进制，并在本地完成原子替换
+func downloadAndApplyUpdate(repo, tag string, foreground bool) error {
+	var assetName string
+	switch runtime.GOOS {
+	case "darwin":
+		switch runtime.GOARCH {
+		case "arm64":
+			assetName = "codex-input-unlock-darwin-arm64"
+		case "amd64":
+			assetName = "codex-input-unlock-darwin-amd64"
+		}
+	case "windows":
+		switch runtime.GOARCH {
+		case "amd64":
+			assetName = "codex-input-unlock-windows-amd64.exe"
+		case "arm64":
+			assetName = "codex-input-unlock-windows-arm64.exe"
+		}
+	}
+	if assetName == "" {
+		return fmt.Errorf("unsupported platform for auto update: %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	downloadURL := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, assetName)
+	if foreground {
+		fmt.Printf("正在从 %s 下载新版本 %s...\n", repo, tag)
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Get(downloadURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download returned status %d", resp.StatusCode)
+	}
+
+	execPath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if realPath, err := filepath.EvalSymlinks(execPath); err == nil {
+		execPath = realPath
+	}
+
+	tempFile := execPath + fmt.Sprintf(".new-%d", time.Now().UnixNano())
+	f, err := os.OpenFile(tempFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, resp.Body)
+	_ = f.Close()
+	if err != nil {
+		_ = os.Remove(tempFile)
+		return err
+	}
+
+	// 替换运行中程序：
+	// Windows 对运行中文件加锁不允许直接覆写，但允许重命名为 .old 后再写入新文件；
+	// POSIX/Unix 系统支持原子直接 Rename 替换当前 Inode。
+	if runtime.GOOS == "windows" {
+		oldFile := execPath + ".old"
+		_ = os.Remove(oldFile)
+		if err := os.Rename(execPath, oldFile); err != nil {
+			_ = os.Remove(tempFile)
+			return err
+		}
+	}
+	if err := os.Rename(tempFile, execPath); err != nil {
+		return err
+	}
+
+	if foreground {
+		fmt.Printf("✓ 升级完成！已成功更新至 %s\n", tag)
+	} else {
+		fmt.Printf("[auto-update] 检测到新版本并已自动更新至 %s (下次启动生效)\n", tag)
+		if runtime.GOOS == "darwin" {
+			_ = exec.Command("osascript", "-e", fmt.Sprintf(`display notification "已自动静默更新至最新版本 %s（下次启动生效）" with title "Codex Input Unlock"`, tag)).Run()
+		}
+	}
+	return nil
+}
+
+// triggerBackgroundUpdateCheck 在启动应用时异步、静默检测新版。
+// 设置极短超时（2.5秒），断网或弱网时直接放弃，绝不影响客户端启动速度。
+func triggerBackgroundUpdateCheck() {
+	go func() {
+		repo := os.Getenv("CODEX_UNLOCK_RELEASE_REPO")
+		if repo == "" {
+			repo = "kaliluying/codex-input-unlock"
+		}
+		tag, err := fetchLatestReleaseTag(repo, 2500*time.Millisecond)
+		if err != nil {
+			return
+		}
+		if isNewerVersion(tag, appVersion) {
+			_ = downloadAndApplyUpdate(repo, tag, false)
+		}
+	}()
+}
+
+// runUpdate 手动检查并执行在线升级
+func runUpdate() error {
+	repo := os.Getenv("CODEX_UNLOCK_RELEASE_REPO")
+	if repo == "" {
+		repo = "kaliluying/codex-input-unlock"
+	}
+	fmt.Printf("当前版本: v%s\n", appVersion)
+	fmt.Printf("正在检查 %s 的最新发布版本...\n", repo)
+	tag, err := fetchLatestReleaseTag(repo, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("检查更新失败: %w", err)
+	}
+	if !isNewerVersion(tag, appVersion) {
+		fmt.Printf("当前已是最新版本 (%s)，无需更新。\n", tag)
+		return nil
+	}
+	fmt.Printf("发现新版本: %s (当前: v%s)\n", tag, appVersion)
+	return downloadAndApplyUpdate(repo, tag, true)
+}
+
+// ============================================================================
 // 6. 命令行解析与程序入口 (CLI Entry Point)
 // ============================================================================
 
@@ -1926,11 +2125,29 @@ func main() {
 			if arg == "--detach" || arg == "-detach" {
 				isDetached = true
 			}
+			if arg == "-v" || arg == "--version" || arg == "-version" {
+				cmd = "version"
+			}
 			continue
 		}
 		if cmd == "" {
 			cmd = arg
 		}
+	}
+
+	// 子命令 0: version (打印当前程序版本)
+	if cmd == "version" {
+		fmt.Printf("codex-input-unlock v%s (%s/%s)\n", appVersion, runtime.GOOS, runtime.GOARCH)
+		return
+	}
+
+	// 子命令 0.5: update (手动检查并升级到最新版本)
+	if cmd == "update" {
+		if err := runUpdate(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// 子命令 1: stop (一键清理运行中的客户端与守护进程)
@@ -1980,6 +2197,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: --port is required for supervise")
 			os.Exit(1)
 		}
+		triggerBackgroundUpdateCheck()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		sigCh := make(chan os.Signal, 1)

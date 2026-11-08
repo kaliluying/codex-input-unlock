@@ -109,12 +109,23 @@ go test -v ./...
 | `-Action Diagnose` | 诊断环境依赖、已安装包状态与文件完整性 |
 | `-Action Verify` | 检查守护进程存活、CDP 连通性与断点就绪状态 |
 | `-Action Inspect` | 输出包含网络监听、进程树与最近日志的详细诊断 JSON |
+| `-Action Update` | 检查并在线升级到最新发布的版本 |
 | `-Action Uninstall` | 停止守护进程、移除快捷方式与运行目录（不影响用户配置与官方包） |
 
 **常用参数**：
 - `-NoShortcut`：安装时不创建开始菜单快捷方式
 - `-DisableComputerUseBootstrap`：不写入 Computer Use 环境变量
 - `-StartupTimeoutSeconds <秒数>`：自定义启动超时等待（默认 60s）
+
+---
+
+## 智能更新机制
+
+- **启动时自动检测（静默）**：每次启动时，程序会在后台极速探测 GitHub 是否有新 Release（超时 2.5 秒，断网弱网自动跳过）。检测到新版后自动在后台下载替换自身，并弹出桌面通知提醒“下次启动生效”，完全不影响当前启动速度。
+- **手动在线更新**：
+  - macOS: `./codex-input-unlock update`
+  - Windows: `.\codex-input-unlock.ps1 -Action Update`
+- **查看当前版本**：`./codex-input-unlock version`
 
 ---
 

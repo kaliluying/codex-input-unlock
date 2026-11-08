@@ -107,6 +107,30 @@ func TestConditionValidation(t *testing.T) {
 	}
 }
 
+// TestVersionComparison 验证版本号语义化大小比较逻辑
+func TestVersionComparison(t *testing.T) {
+	cases := []struct {
+		remote string
+		local  string
+		newer  bool
+	}{
+		{"v1.0.1", "1.0.0", true},
+		{"v1.1.0", "v1.0.9", true},
+		{"v2.0.0", "v1.99.99", true},
+		{"v1.0.0.1", "v1.0.0", true},
+		{"v1.0.0", "v1.0.0", false},
+		{"v1.0.0", "v1.0.1", false},
+		{"1.0.0", "2.0.0", false},
+		{"v1.0.0-rc1", "1.0.0", false},
+	}
+	for _, c := range cases {
+		got := isNewerVersion(c.remote, c.local)
+		if got != c.newer {
+			t.Errorf("isNewerVersion(%q, %q) = %v; want %v", c.remote, c.local, got, c.newer)
+		}
+	}
+}
+
 // Electron asar 归档包文件结构映射
 type asarEntry struct {
 	Size   int64                 `json:"size"`

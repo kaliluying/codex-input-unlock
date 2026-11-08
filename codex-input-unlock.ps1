@@ -8,11 +8,12 @@
 #   - Verify   : 验证当前正在运行的解锁会话健康状态
 #   - Inspect  : 查看当前的安装状态与配置详情
 #   - Uninstall: 清理安装目录与桌面快捷方式
+#   - Update   : 检查并在线升级到最新发布的版本
 # ==============================================================================
 
 [CmdletBinding()]
 param(
-  [ValidateSet('Diagnose', 'Install', 'Launch', 'Verify', 'Inspect', 'Uninstall')]
+  [ValidateSet('Diagnose', 'Install', 'Launch', 'Verify', 'Inspect', 'Uninstall', 'Update')]
   [string]$Action = 'Diagnose',
   [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'OpenAI\CodexInputUnlock'),
   [int]$DebugPort = 0,
@@ -570,6 +571,10 @@ try {
     'Verify' { Invoke-Verify }
     'Inspect' { Invoke-Inspect }
     'Uninstall' { Invoke-WithPatchMutex { Invoke-Uninstall } }
+    'Update' {
+      $bin = Ensure-SupervisorBinary
+      & $bin update
+    }
   }
 } catch {
   Write-Host "[codex-input-unlock] ERROR: $($_.Exception.Message)" -ForegroundColor Red

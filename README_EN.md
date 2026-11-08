@@ -134,6 +134,16 @@ Common parameters:
 
 ---
 
+## Smart Auto-Update
+
+- **Silent Detection on Launch**: On startup, a lightweight background check queries GitHub for new releases (with a 2.5s timeout, silently skipped when offline). When a new version is detected, it is downloaded in the background to replace the executable and fires a desktop notification ("effective on next launch") without affecting startup latency.
+- **Manual Online Update**:
+  - macOS: `./codex-input-unlock update`
+  - Windows: `.\codex-input-unlock.ps1 -Action Update`
+- **Check Current Version**: `./codex-input-unlock version`
+
+---
+
 ## Testing
 
 ```powershell
