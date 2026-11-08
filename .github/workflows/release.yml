@@ -44,7 +44,12 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
         run: |
-          go build -trimpath -ldflags="-s -w" -o dist/${{ matrix.output }} .
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ]; then
+            VERSION="1.0.0"
+          fi
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w -X main.appVersion=${VERSION}" -o dist/${{ matrix.output }} .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -66,6 +71,42 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Package release archives
+        run: |
+          cd dist
+          # macOS Apple Silicon (arm64)
+          mkdir -p macos-arm64
+          cp codex-input-unlock-darwin-arm64 macos-arm64/codex-input-unlock
+          chmod +x macos-arm64/codex-input-unlock
+          cp "../启动 Codex (Mac).command" macos-arm64/
+          cp ../README.md macos-arm64/
+          zip -r codex-input-unlock-macos-arm64.zip macos-arm64
+
+          # macOS Intel (amd64)
+          mkdir -p macos-amd64
+          cp codex-input-unlock-darwin-amd64 macos-amd64/codex-input-unlock
+          chmod +x macos-amd64/codex-input-unlock
+          cp "../启动 Codex (Mac).command" macos-amd64/
+          cp ../README.md macos-amd64/
+          zip -r codex-input-unlock-macos-amd64.zip macos-amd64
+
+          # Windows x64
+          mkdir -p win-amd64
+          cp codex-input-unlock-windows-amd64.exe win-amd64/codex-input-unlock.exe
+          cp ../codex-input-unlock.ps1 win-amd64/
+          cp ../README.md win-amd64/
+          zip -r codex-input-unlock-windows-amd64.zip win-amd64
+
+          # Windows arm64
+          mkdir -p win-arm64
+          cp codex-input-unlock-windows-arm64.exe win-arm64/codex-input-unlock.exe
+          cp ../codex-input-unlock.ps1 win-arm64/
+          cp ../README.md win-arm64/
+          zip -r codex-input-unlock-windows-arm64.zip win-arm64
+
+          # 清理临时文件夹，只保留 zip 和裸二进制
+          rm -rf macos-arm64 macos-amd64 win-amd64 win-arm64
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
