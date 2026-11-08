@@ -1,3 +1,15 @@
+# ==============================================================================
+# Codex / ChatGPT 输入框解锁 —— Windows PowerShell 控制器与环境调度器
+#
+# 支持动作 (-Action):
+#   - Diagnose : 检查当前系统环境、Codex/ChatGPT 客户端安装状态以及二进制就绪情况
+#   - Install  : 安装到 LocalAppData，生成桌面快捷方式并准备二进制运行环境
+#   - Launch   : 一键拉起 Codex/ChatGPT 并开启 CDP 断点注入守护
+#   - Verify   : 验证当前正在运行的解锁会话健康状态
+#   - Inspect  : 查看当前的安装状态与配置详情
+#   - Uninstall: 清理安装目录与桌面快捷方式
+# ==============================================================================
+
 [CmdletBinding()]
 param(
   [ValidateSet('Diagnose', 'Install', 'Launch', 'Verify', 'Inspect', 'Uninstall')]
@@ -21,8 +33,7 @@ $script:LogDirectory = Join-Path $InstallRoot 'logs'
 $script:StatePath = Join-Path $script:StateDirectory 'install-state.json'
 $script:SettingsPath = Join-Path $script:StateDirectory 'settings.json'
 $script:RuntimeController = Join-Path $InstallRoot 'codex-input-unlock.ps1'
-$script:RuntimeSupervisor = Join-Path $InstallRoot 'cdp-supervisor.mjs'
-$script:RuntimeGate = Join-Path $InstallRoot 'quota-gate.cjs'
+$script:RuntimeSupervisor = Join-Path $InstallRoot 'codex-input-unlock.exe'
 
 function Write-Info([string]$Message) {
   Write-Host "[codex-input-unlock] $Message"
@@ -230,17 +241,15 @@ function New-Shortcut([string]$ControllerPath) {
 
 function Invoke-Diagnose {
   $package = Resolve-CodexPackage
-  $node = Get-Command node -ErrorAction SilentlyContinue | Select-Object -First 1
   $pwsh = try { Resolve-PwshExecutable } catch { $null }
   $activatorReady = $false
   try { Ensure-ActivationType; $activatorReady = $true } catch { $activatorReady = $false }
   $state = Read-JsonFile $script:StatePath
-  $requiredRuntime = @($script:RuntimeController, $script:RuntimeSupervisor, $script:RuntimeGate, $script:SettingsPath, $script:StatePath)
+  $requiredRuntime = @($script:RuntimeController, $script:RuntimeSupervisor, $script:SettingsPath, $script:StatePath)
   $installed = @($requiredRuntime | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -eq 0
   [pscustomobject]@{
     Package = $package
     RunningPackageProcesses = @(Get-CodexPackageProcesses $package)
-    Node = if ($node) { $node.Source } else { $null }
     Pwsh = if ($pwsh) { $pwsh } else { $null }
     PwshUsable = $null -ne $pwsh
     ActivatorReady = $activatorReady
@@ -252,18 +261,59 @@ function Invoke-Diagnose {
   }
 }
 
+function Ensure-Executable {
+  $localBin = Join-Path $script:SourceRoot 'codex-input-unlock.exe'
+  if (Test-Path -LiteralPath $script:RuntimeSupervisor -PathType Leaf) {
+    return $script:RuntimeSupervisor
+  }
+  if (Test-Path -LiteralPath $localBin -PathType Leaf) {
+    return $localBin
+  }
+
+  $go = Get-Command go -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($go) {
+    Write-Info 'Compiling codex-input-unlock.exe from source...'
+    $prevLocation = Get-Location
+    try {
+      Set-Location $script:SourceRoot
+      & $go.Source build -trimpath -ldflags="-s -w" -o $localBin .
+      if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $localBin -PathType Leaf)) {
+        return $localBin
+      }
+    } finally {
+      Set-Location $prevLocation
+    }
+  }
+
+  Write-Info 'Executable not found and Go compiler not installed. Downloading prebuilt binary from GitHub Release...'
+  $releaseRepo = if ($env:CODEX_UNLOCK_RELEASE_REPO) { $env:CODEX_UNLOCK_RELEASE_REPO } else { 'kaliluying/codex-input-unlock' }
+  $arch = if ([System.Environment]::Is64BitOperatingSystem) {
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
+  } else {
+    '386'
+  }
+  $assetName = "codex-input-unlock-windows-$arch.exe"
+  $url = "https://github.com/$releaseRepo/releases/latest/download/$assetName"
+  Write-Info "Downloading $url -> $localBin..."
+  try {
+    Invoke-WebRequest -Uri $url -OutFile $localBin -UseBasicParsing
+  } catch {
+    throw "Failed to download $assetName from $url. Error: $($_.Exception.Message). Please download it manually and place it at $localBin"
+  }
+  if (-not (Test-Path -LiteralPath $localBin -PathType Leaf)) {
+    throw "Downloaded binary was not found at $localBin"
+  }
+  return $localBin
+}
+
 function Invoke-Install {
   $package = Resolve-CodexPackage
-  $node = Get-Command node -ErrorAction Stop | Select-Object -First 1
-  $nodeVersionText = (& $node.Source -p 'process.versions.node').Trim()
-  if ($LASTEXITCODE -ne 0) { throw 'Could not query Node.js version.' }
-  $nodeVersion = [version]$nodeVersionText
-  if ($nodeVersion.Major -lt 22) { throw "Node.js 22 or newer is required; found $nodeVersionText" }
   Ensure-ActivationType
   if ($DryRun) {
-    return [pscustomobject]@{ DryRun = $true; Package = $package; InstallRoot = $InstallRoot; Node = $node.Source; NodeVersion = $nodeVersionText; ActivatorReady = $true }
+    return [pscustomobject]@{ DryRun = $true; Package = $package; InstallRoot = $InstallRoot; ActivatorReady = $true }
   }
-  $requiredFiles = @('codex-input-unlock.ps1', 'cdp-supervisor.mjs', 'quota-gate.cjs')
+  Ensure-Executable | Out-Null
+  $requiredFiles = @('codex-input-unlock.ps1', 'codex-input-unlock.exe')
   $optionalFiles = @('README.md', 'ATTRIBUTION.md', 'LICENSE', 'SECURITY.md')
   foreach ($file in $requiredFiles) {
     $source = Join-Path $script:SourceRoot $file
@@ -335,7 +385,6 @@ function Invoke-Launch {
     $processSummary = ($running | ForEach-Object { "$($_.PackageName)/$($_.Name) (PID $($_.ProcessId))" }) -join ', '
     throw "Launch blocked because Codex or ChatGPT Desktop is still running: $processSummary. Quit the application normally, including its system tray icon, and then launch Codex Input Unlock again. Codex Input Unlock did not close any running application."
   }
-  $node = Get-Command node -ErrorAction Stop | Select-Object -First 1
   $port = if ($DebugPort -gt 0) { $DebugPort } else { Get-FreeTcpPort }
   if ($port -lt 1 -or $port -gt 65535) { throw "Invalid debug port: $port" }
 
@@ -344,14 +393,13 @@ function Invoke-Launch {
   $stdoutPath = Join-Path $script:LogDirectory "supervisor-$stamp.stdout.log"
   $stderrPath = Join-Path $script:LogDirectory "supervisor-$stamp.stderr.log"
   $arguments = @(
-    $script:RuntimeSupervisor,
+    'supervise',
     '--port', [string]$port,
-    '--gate', $script:RuntimeGate,
     '--status', $statusPath,
     '--startup-timeout', [string]$StartupTimeoutSeconds
   )
-  $nodeArgumentString = ($arguments | ForEach-Object { Quote-WindowsArgument ([string]$_) }) -join ' '
-  $supervisor = Start-Process -FilePath $node.Source -ArgumentList $nodeArgumentString -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+  $supervisorArgumentString = ($arguments | ForEach-Object { Quote-WindowsArgument ([string]$_) }) -join ' '
+  $supervisor = Start-Process -FilePath $script:RuntimeSupervisor -ArgumentList $supervisorArgumentString -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
   try {
     if (-not $DisableComputerUseBootstrap -and (!$settings -or $settings.enableComputerUseBootstrap -ne $false)) {
       [Environment]::SetEnvironmentVariable('CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE', '1', 'Process')
@@ -416,7 +464,7 @@ function Invoke-Verify {
   $supervisorProcess = $null
   if ($supervisorPid) {
     $supervisorProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$supervisorPid)" -ErrorAction SilentlyContinue
-    $supervisorAlive = $null -ne $supervisorProcess -and $supervisorProcess.Name -eq 'node.exe' -and $supervisorProcess.CommandLine -like "*cdp-supervisor.mjs*"
+    $supervisorAlive = $null -ne $supervisorProcess -and $supervisorProcess.Name -eq 'codex-input-unlock.exe'
   }
   $cdpListening = $false
   $cdpResponding = $false
@@ -485,7 +533,7 @@ function Invoke-Uninstall {
   }
   if ($state -and $state.supervisorPid) {
     $process = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$state.supervisorPid)" -ErrorAction SilentlyContinue
-    if ($process -and $process.CommandLine -like "*cdp-supervisor.mjs*") {
+    if ($process -and ($process.Name -eq 'codex-input-unlock.exe' -or $process.CommandLine -like "*cdp-supervisor.mjs*")) {
       Stop-Process -Id ([int]$state.supervisorPid) -Force -ErrorAction SilentlyContinue
     }
   }

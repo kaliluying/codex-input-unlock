@@ -2,7 +2,15 @@
 
 [English](README_EN.md) | 简体中文
 
-针对 Windows 官方 Codex Desktop / ChatGPT Desktop 的**外部运行时输入解锁工具**。
+针对 Windows 与 macOS 官方 Codex Desktop / ChatGPT Desktop 的**外部运行时输入解锁工具**。
+
+> **致谢与上游说明**：
+> 本项目由上游开源项目 [1zero224/codex-input-unlock](https://github.com/1zero224/codex-input-unlock) 修改而来，感谢原作者 [1zero224](https://github.com/1zero224) 提出的 CDP 零暂停条件断点解锁思路。
+> 
+> 本独立仓库的核心改进：
+> 1. **纯 Go 标准库重构**：完整重写 CDP 监督器与配额匹配算法，**彻底摆脱 Node.js 运行时依赖**；
+> 2. **跨平台单文件二进制**：编译为仅数兆大小的自包含可执行文件，开箱即用；
+> 3. **零环境门槛与自动拉取**：即便本地未安装 Go 编译器，启动脚本亦会自动从 Release 拉取对应架构的预编译二进制，无需任何运行环境配置。
 
 当用户在客户端中配置了**第三方 API Provider**，且登录的官方账号没有额度时，官方客户端前端会强行将输入框与发送按钮置灰锁定。本项目通过 Chrome DevTools Protocol (CDP) 注入动态零暂停条件断点，**解除本地前端对输入框与发送动作的封锁**。
 
@@ -11,15 +19,15 @@
 ## 工作原理
 
 ```text
-PowerShell 控制器 (codex-input-unlock.ps1)
-  ├─ 识别官方 Store 包 (Codex / ChatGPT Desktop)
-  ├─ 分配随机 TCP 端口冷启动 Node.js CDP 守护进程
-  └─ 通过 COM 激活带调试参数的客户端
+启动控制器 / 命令行入口 (codex-input-unlock / codex-input-unlock.ps1)
+  ├─ 识别官方客户端应用 (macOS .app / Windows Store 包)
+  ├─ 分配随机 TCP 端口并启动 Go 原生 CDP 守护进程
+  └─ 带调试参数激活客户端
                         │
                         ▼
-CDP 守护进程 (cdp-supervisor.mjs + quota-gate.cjs)
-  ├─ 连接客户端 Renderer 调试端口
-  ├─ 模式匹配定位前端 JS bundle 中的配额校验逻辑
+Go 原生守护进程 (codex-input-unlock)
+  ├─ 连接客户端 Renderer 调试端口 (内置轻量 RFC 6455 WebSocket 协议驱动)
+  ├─ 模式匹配定位前端 JS bundle 中的配额校验逻辑 (内置 9 种定位策略)
   ├─ 安装条件断点：(quota = false, false)
   │    └─ 静默重置本地变量，条件恒为 false 永不挂起页面
   └─ 遇到页面刷新 (Ctrl+R) 自动重新注入
@@ -29,9 +37,9 @@ CDP 守护进程 (cdp-supervisor.mjs + quota-gate.cjs)
 
 ## 环境要求
 
-- **操作系统**：Windows 10 / 11 (x64 / ARM64)
-- **官方客户端**：Microsoft Store 版 Codex Desktop 或 ChatGPT Desktop
-- **运行依赖**：PowerShell 7+ (`pwsh`) 与 Node.js 22+
+- **操作系统**：Windows 10 / 11 (x64 / ARM64) 或 macOS (Apple Silicon / Intel)
+- **官方客户端**：Codex Desktop 或 ChatGPT Desktop
+- **运行依赖**：零外部依赖（无需安装 Node.js，单文件原生二进制运行）
 
 ---
 
@@ -49,39 +57,46 @@ requires_openai_auth = true
 
 同时请先在 Codex Desktop 中登录您的 Codex 账号。只有第三方 Provider、`requires_openai_auth = true` 和 Codex 登录状态均已准备好后，本工具才负责解除官方额度状态造成的本地输入与发送门禁；它不会替代 Provider 配置或账号登录。
 
-### 1. 安装
+### 快速启动
 
-在源码目录下打开 PowerShell 7 并执行：
+> **注意**：启动前请**完全退出**正在运行的 Codex Desktop 或 ChatGPT Desktop（包括系统托盘图标）。直接点击官方原生图标启动不带调试参数，不会加载解锁逻辑。
 
-```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File '.\codex-input-unlock.ps1' -Action Install
-```
-
-*安装会将必要运行文件复制至 `%LOCALAPPDATA%\OpenAI\CodexInputUnlock`，并在 Windows 开始菜单生成 **`Codex Input Unlock`** 快捷方式。*
-
-### 2. 启动
-
-> **注意**：启动前请**完全退出**正在运行的 Codex Desktop 或 ChatGPT Desktop（包括系统托盘图标）。如果检测到任一客户端仍在运行，启动器不会关闭它，而会保留错误窗口并显示对应进程信息。
-
-- **方式 A（推荐）**：打开开始菜单，直接点击 **`Codex Input Unlock`**。
+#### macOS 用户
+- **方式 A（桌面一键启动）**：直接在 Finder 中双击根目录下的 **`启动 Codex (Mac).command`**（首次运行会自动就绪，之后一键调起）。
 - **方式 B（命令行）**：
-  ```powershell
-  pwsh -NoProfile -ExecutionPolicy Bypass `
-    -File "$env:LOCALAPPDATA\OpenAI\CodexInputUnlock\codex-input-unlock.ps1" `
-    -Action Launch
+  ```bash
+  # 直接启动并自动守护注入
+  ./codex-input-unlock
+
+  # 查看诊断状态
+  ./codex-input-unlock diagnose
   ```
 
-*注：直接点击官方原生图标启动不带调试参数，不会加载解锁逻辑。*
+#### Windows 用户
+- **方式 A（开始菜单快捷方式）**：
+  在源码目录下打开 PowerShell 7 并执行一次安装：
+  ```powershell
+  pwsh -NoProfile -ExecutionPolicy Bypass -File '.\codex-input-unlock.ps1' -Action Install
+  ```
+  安装完成后，直接在 Windows 开始菜单点击 **`Codex Input Unlock`**。
+- **方式 B（命令行直接启动）**：
+  ```powershell
+  .\codex-input-unlock.exe
+  ```
 
-### 3. 验证状态
+---
 
-```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass `
-  -File "$env:LOCALAPPDATA\OpenAI\CodexInputUnlock\codex-input-unlock.ps1" `
-  -Action Verify
+## 自动化测试与离线自测
+
+无需启动应用，可直接运行 Go 测试套件验证规则引擎：
+
+```bash
+# 运行全部单测（涵盖多版本 bundle mock 及本机已安装应用 asar 探测）
+go test -v ./...
+
+# 针对指定前端 bundle 进行离线断点定位验证
+./codex-input-unlock --self-test --bundle <path-to-js-bundle>
 ```
-
-输出中 `RuntimeReady : True` 即表示守护进程正常运行、断点已挂载，输入框已解除封锁。
 
 ---
 
@@ -125,7 +140,7 @@ Codex 更新会重新压缩并调整前端 bundle 的结构，因此定位逻辑
 启动时 supervisor 会同时挂载当前 bundle 中所有命中的锚点（最多 4 个），任一断点命中即可解锁；`runtime-status-*.json` 中的 `breakpoints` 与 `gateStats.unlockCount` 可用于确认实际生效的锚点。升级后若启动超时，错误信息会携带 `lastProbe`（quota atom 数量、`submitDisabled` 是否存在、各定位器命中情况）。补充规则前先运行：
 
 ```powershell
-node .\cdp-supervisor.mjs --self-test --gate .\quota-gate.cjs --bundle <解包后的 app-primary-*.js>
+.\codex-input-unlock --self-test --bundle <解包后的 app-primary-*.js>
 ```
 
 该命令会输出当前 bundle 命中的全部锚点与断点条件。
@@ -137,6 +152,12 @@ node .\cdp-supervisor.mjs --self-test --gate .\quota-gate.cjs --bundle <解包�
 1. **必须通过专属入口冷启动**：官方原版快捷方式启动的进程不带 CDP 参数。
 2. **仅解决本地输入框锁定**：本工具不伪造服务端 API 额度；第三方 API 的调用消耗、鉴权和限流由您配置的 Provider 自行处理。
 3. **免责声明**：本项目为独立的非官方开源工具，与 OpenAI 无任何隶属关系。
+
+---
+
+## 致谢与上游项目
+
+本项目基于 [1zero224/codex-input-unlock](https://github.com/1zero224/codex-input-unlock) 进行独立维护与二次开发。感谢上游项目作者及社区贡献者在前端 CDP 断点注入方案上的探索。
 
 ---
 

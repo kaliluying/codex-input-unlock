@@ -7,8 +7,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $controller = Join-Path $repo 'codex-input-unlock.ps1'
-$supervisor = Join-Path $repo 'cdp-supervisor.mjs'
-$gate = Join-Path $repo 'quota-gate.cjs'
+$bin = Join-Path $repo 'codex-input-unlock.exe'
+if (-not (Test-Path -LiteralPath $bin)) {
+  $bin = Join-Path $repo 'codex-input-unlock'
+}
 
 foreach ($script in @($controller, $PSCommandPath)) {
   $tokens = $null
@@ -16,21 +18,6 @@ foreach ($script in @($controller, $PSCommandPath)) {
   [void][System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$errors)
   if ($errors.Count -gt 0) { throw "PowerShell parse failed for $script`: $($errors[0].Message)" }
 }
-
-& node --check $supervisor
-if ($LASTEXITCODE -ne 0) { throw 'cdp-supervisor.mjs failed node --check' }
-$supervisorText = Get-Content -LiteralPath $supervisor -Raw -Encoding UTF8
-if ($supervisorText -match 'Debugger\.setBreakpoint[\s\S]{0,300}\blocation:\s*actualLocation,\s*\r?\n\s*condition,') {
-  throw 'supervisor uses an undefined shorthand breakpoint condition'
-}
-& node --check $gate
-if ($LASTEXITCODE -ne 0) { throw 'quota-gate.cjs failed node --check' }
-
-$gateApiText = & node -e "const gate=require(process.argv[1]); const condition=gate.condition({mode:'codex-local-quota',quotaVariable:'quota'}); console.log(JSON.stringify({locate:typeof gate.locate,conditionType:typeof gate.condition,condition}));" $gate
-if ($LASTEXITCODE -ne 0) { throw 'quota-gate.cjs API probe failed' }
-$gateApi = $gateApiText | ConvertFrom-Json
-if ($gateApi.locate -ne 'function' -or $gateApi.conditionType -ne 'function') { throw 'quota gate API is incomplete' }
-if ($gateApi.condition -ne '(quota=false,false)') { throw 'quota gate condition contains unexpected extra logic' }
 
 if (-not $SkipPackageCheck) {
   $configPath = Join-Path $env:USERPROFILE '.codex\config.toml'
@@ -79,27 +66,15 @@ if ($controllerText -notmatch 'Press Enter to close this window') {
 }
 
 if ($BundlePath) {
-  $selfTestText = & node $supervisor --self-test --gate $gate --bundle $BundlePath
+  if (-not (Test-Path -LiteralPath $bin)) {
+    throw "Binary not found at $bin for bundle self-test"
+  }
+  $selfTestText = & $bin --self-test --bundle $BundlePath
   if ($LASTEXITCODE -ne 0) { throw 'Quota gate current-bundle self-test failed' }
   $selfTest = $selfTestText | ConvertFrom-Json
-  if ($selfTest.location.mode -notin @('codex-local-quota', 'local-submit-quota', 'composer-quota-consumer', 'quota-atom-data')) { throw 'Current bundle did not use a supported Codex local quota locator' }
+  if ($selfTest.location.mode -notin @('codex-local-quota', 'local-submit-quota', 'composer-quota-consumer', 'quota-atom-data', 'codex-rate-limit-derived-v2', 'codex-rate-limit-derived', 'codex-rate-limit-state')) { throw "Current bundle did not use a supported Codex local quota locator: $($selfTest.location.mode)" }
   if (-not $selfTest.location.quotaVariable) {
     throw 'Current bundle locator did not identify the local quota variable'
-  }
-  if ($selfTest.location.mode -eq 'codex-local-quota' -and -not $selfTest.location.hostVariable) {
-    throw 'Current bundle locator did not identify the local host variable'
-  }
-  if ($selfTest.location.mode -eq 'quota-atom-data') {
-    if ($selfTest.condition -notmatch '^\(__codexExternalQuotaGate\.unlock\([A-Za-z_$][\w$]*\),false\)$') {
-      throw 'Current bundle locator produced an unexpected atom breakpoint condition'
-    }
-  } elseif ($selfTest.condition -notmatch '^\([A-Za-z_$][\w$]*=false,false\)$') {
-    throw 'Current bundle locator produced an unexpected breakpoint condition'
-  }
-  if ($selfTest.explain.atomCount -ne 1) { throw 'Current bundle does not expose exactly one quota atom' }
-  if ($selfTest.explain.matched -notcontains 'quota-atom-data') { throw 'Current bundle atom-data fallback is not locatable' }
-  if ($null -eq $selfTest.location.endLineNumber -or $null -eq $selfTest.location.endColumnNumber) {
-    throw 'Current bundle locator did not bound the quota expression'
   }
 }
 

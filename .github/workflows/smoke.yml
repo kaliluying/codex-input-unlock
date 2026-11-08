@@ -8,18 +8,28 @@ permissions:
   contents: read
 
 jobs:
-  windows-smoke:
-    runs-on: windows-latest
+  test:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          node-version: '22'
+          go-version: '1.22'
 
-      - name: Run static smoke tests
+      - name: Run Go tests
+        run: go test -v ./...
+
+      - name: Build binary
+        run: go build -v ./...
+
+      - name: Run Windows static smoke tests
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
