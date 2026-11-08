@@ -1867,16 +1867,7 @@ func runStop() error {
 		_ = exec.Command("osascript", "-e", `tell application id "com.openai.chat" to quit`).Run()
 	}
 	currentPid := os.Getpid()
-	out, err := exec.Command("pgrep", "-f", "codex-input-unlock").Output()
-	if err == nil {
-		pids := strings.Fields(string(out))
-		for _, pidStr := range pids {
-			var pid int
-			if _, err := fmt.Sscanf(pidStr, "%d", &pid); err == nil && pid != currentPid {
-				_ = syscall.Kill(pid, syscall.SIGTERM)
-			}
-		}
-	}
+	stopAllUnlockProcesses(currentPid)
 	fmt.Println("已停止 Codex / ChatGPT 及解锁守护进程。")
 	return nil
 }

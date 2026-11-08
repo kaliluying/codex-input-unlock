@@ -16,3 +16,9 @@ func prepareDetachedCmd(cmd *exec.Cmd) {
 	}
 }
 
+// stopAllUnlockProcesses 在 Windows 系统下调用 taskkill 结束残留的解锁守护进程
+func stopAllUnlockProcesses(currentPid int) {
+	_ = exec.Command("taskkill", "/F", "/IM", "codex-input-unlock.exe").Run()
+}
+
+

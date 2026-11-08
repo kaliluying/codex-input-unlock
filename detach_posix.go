@@ -3,7 +3,10 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 )
 
@@ -15,4 +18,22 @@ func prepareDetachedCmd(cmd *exec.Cmd) {
 		Setsid: true,
 	}
 }
+
+// stopAllUnlockProcesses 在 POSIX 系统下查找并优雅终止其他正在运行的解锁守护进程
+func stopAllUnlockProcesses(currentPid int) {
+	out, err := exec.Command("pgrep", "-f", "codex-input-unlock").Output()
+	if err == nil {
+		pids := strings.Fields(string(out))
+		for _, pidStr := range pids {
+			var pid int
+			if _, err := fmt.Sscanf(pidStr, "%d", &pid); err == nil && pid != currentPid {
+				proc, err := os.FindProcess(pid)
+				if err == nil {
+					_ = proc.Signal(syscall.SIGTERM)
+				}
+			}
+		}
+	}
+}
+
 
