@@ -1,3 +1,4 @@
 module codex-input-unlock
 
-go 1.22
+go 1.23
+
