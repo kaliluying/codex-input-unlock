@@ -1679,7 +1679,10 @@ func runSelfTest(bundlePath, gatePath string) error {
 
 // runLaunch 拉起桌面客户端并开启 CDP 守护进程（前台终端运行模式）
 func runLaunch(gatePath, statusPath string, debugPort int, startupTimeoutSec int, killExisting bool) error {
-	triggerBackgroundUpdateCheck()
+	// 启动前检查新版本：一旦发现新版则更新且暂不拉起应用，更新完提示用户重新启动
+	if checkPreLaunchUpdate() {
+		return nil
+	}
 
 	appPath, err := findAppPath()
 	if err != nil {
@@ -1773,11 +1776,17 @@ func runLaunch(gatePath, statusPath string, debugPort int, startupTimeoutSec int
 
 // runLaunchDetached 以后台托管模式启动客户端（适用于桌面一键启动脚本）
 // 【工作流程】：
-// 1. 父进程在后台以独立的 Process Session 启动当前的二进制（Setsid / CREATE_NO_WINDOW）；
-// 2. 父进程等待子进程通过 status 文件汇报 state=="ready"（约 0.5 ~ 1 秒）；
-// 3. 一旦确认断点注入成功，在控制台打印成功提示并向桌面发送系统通知，然后父进程退出（exit 0）；
-// 4. 终端窗口随之立即关闭，后台子进程继续保持静默守护，直到 ChatGPT 客户端被按 Cmd+Q 退出时自动关闭。
+// 1. 启动前快速检测 GitHub 新版本：若发现新版则立即更新，暂不启动客户端，并弹窗提示用户重新启动；
+// 2. 若无新版，父进程在后台以独立的 Process Session 启动当前的二进制（Setsid / CREATE_NO_WINDOW）；
+// 3. 父进程等待子进程通过 status 文件汇报 state=="ready"（约 0.5 ~ 1 秒）；
+// 4. 一旦确认断点注入成功，在控制台打印成功提示并向桌面发送系统通知，然后父进程退出（exit 0）；
+// 5. 终端窗口随之立即关闭，后台子进程继续保持静默守护，直到 ChatGPT 客户端被按 Cmd+Q 退出时自动关闭。
 func runLaunchDetached(gatePath, statusPath string, debugPort int, startupTimeoutSec int, killExisting bool) error {
+	// 启动前检查新版本：一旦发现新版则更新且暂不拉起应用，更新完提示用户重新启动
+	if checkPreLaunchUpdate() {
+		return nil
+	}
+
 	appPath, err := findAppPath()
 	if err != nil {
 		return err
@@ -2052,31 +2061,39 @@ func downloadAndApplyUpdate(repo, tag string, foreground bool) error {
 
 	if foreground {
 		fmt.Printf("✓ 升级完成！已成功更新至 %s\n", tag)
-	} else {
-		fmt.Printf("[auto-update] 检测到新版本并已自动更新至 %s (下次启动生效)\n", tag)
-		if runtime.GOOS == "darwin" {
-			_ = exec.Command("osascript", "-e", fmt.Sprintf(`display notification "已自动静默更新至最新版本 %s（下次启动生效）" with title "Codex Input Unlock"`, tag)).Run()
-		}
 	}
 	return nil
 }
 
-// triggerBackgroundUpdateCheck 在启动应用时异步、静默检测新版。
-// 设置极短超时（2.5秒），断网或弱网时直接放弃，绝不影响客户端启动速度。
-func triggerBackgroundUpdateCheck() {
-	go func() {
-		repo := os.Getenv("CODEX_UNLOCK_RELEASE_REPO")
-		if repo == "" {
-			repo = "kaliluying/codex-input-unlock"
-		}
-		tag, err := fetchLatestReleaseTag(repo, 2500*time.Millisecond)
-		if err != nil {
-			return
-		}
-		if isNewerVersion(tag, appVersion) {
-			_ = downloadAndApplyUpdate(repo, tag, false)
-		}
-	}()
+// checkPreLaunchUpdate 在拉起应用前快速检测是否有新版本。
+// 【产品逻辑】：一旦在后台发现新版，就立即下载更新且暂不启动应用，更新完成后提示用户重新启动。
+// 若无新版或检测超时（1.5 秒极速探测），返回 false 顺畅进入应用启动流程。
+func checkPreLaunchUpdate() bool {
+	repo := os.Getenv("CODEX_UNLOCK_RELEASE_REPO")
+	if repo == "" {
+		repo = "kaliluying/codex-input-unlock"
+	}
+	tag, err := fetchLatestReleaseTag(repo, 1500*time.Millisecond)
+	if err != nil || !isNewerVersion(tag, appVersion) {
+		return false
+	}
+
+	fmt.Printf("发现新版本 %s (当前版本: v%s)，正在为您更新...\n", tag, appVersion)
+	if err := downloadAndApplyUpdate(repo, tag, true); err != nil {
+		fmt.Fprintf(os.Stderr, "自动更新失败: %v。将继续使用当前版本启动...\n", err)
+		return false
+	}
+
+	fmt.Println("\n==================================================")
+	fmt.Printf("✓ 升级完成！已成功更新至最新版本 %s\n", tag)
+	fmt.Println("请重新启动即可享受最新版本。")
+	fmt.Println("==================================================")
+
+	if runtime.GOOS == "darwin" {
+		alertScript := fmt.Sprintf(`display alert "Codex 解锁补丁已更新至 %s" message "更新已就绪，请重新点击启动！" as informational`, tag)
+		_ = exec.Command("osascript", "-e", alertScript).Run()
+	}
+	return true
 }
 
 // runUpdate 手动检查并执行在线升级
@@ -2197,7 +2214,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: --port is required for supervise")
 			os.Exit(1)
 		}
-		triggerBackgroundUpdateCheck()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		sigCh := make(chan os.Signal, 1)

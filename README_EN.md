@@ -136,7 +136,7 @@ Common parameters:
 
 ## Smart Auto-Update
 
-- **Silent Detection on Launch**: On startup, a lightweight background check queries GitHub for new releases (with a 2.5s timeout, silently skipped when offline). When a new version is detected, it is downloaded in the background to replace the executable and fires a desktop notification ("effective on next launch") without affecting startup latency.
+- **Pre-launch Intercept Detection**: On launch, the program quickly checks GitHub for new releases (1.5s timeout, silently skipped when offline). **Once a new version is detected, it downloads the update and holds launching the application. Upon completion, a desktop alert prompts the user to re-launch**, ensuring broken older rules never disrupt your experience.
 - **Manual Online Update**:
   - macOS: `./codex-input-unlock update`
   - Windows: `.\codex-input-unlock.ps1 -Action Update`
