@@ -36,4 +36,11 @@ func stopAllUnlockProcesses(currentPid int) {
 	}
 }
 
+// restartSelf 在 POSIX/Unix 系统下，通过 syscall.Exec 使用新下载的二进制原地替换当前进程映像，
+// 完美继承当前的控制台会话、PID 与命令行参数，实现无感的全自动重启并拉起应用。
+func restartSelf(execPath string, args []string, env []string) error {
+	return syscall.Exec(execPath, args, env)
+}
+
+
 

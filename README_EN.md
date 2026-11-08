@@ -136,7 +136,7 @@ Common parameters:
 
 ## Smart Auto-Update
 
-- **Pre-launch Intercept Detection**: On launch, the program quickly checks GitHub for new releases (1.5s timeout, silently skipped when offline). **Once a new version is detected, it downloads the update and holds launching the application. Upon completion, a desktop alert prompts the user to re-launch**, ensuring broken older rules never disrupt your experience.
+- **Pre-launch Intercept Detection**: On launch, the program quickly checks GitHub for new releases (1.5s timeout, silently skipped when offline). **Once a new version is detected, it automatically downloads the update, and upon completion immediately and automatically restarts itself to launch ChatGPT**, requiring zero manual intervention.
 - **Manual Online Update**:
   - macOS: `./codex-input-unlock update`
   - Windows: `.\codex-input-unlock.ps1 -Action Update`

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -20,5 +21,24 @@ func prepareDetachedCmd(cmd *exec.Cmd) {
 func stopAllUnlockProcesses(currentPid int) {
 	_ = exec.Command("taskkill", "/F", "/IM", "codex-input-unlock.exe").Run()
 }
+
+// restartSelf 在 Windows 系统下，通过拉起新下载的二进制进程并退出当前进程的方式完成自身自动重启。
+func restartSelf(execPath string, args []string, env []string) error {
+	var cmdArgs []string
+	if len(args) > 1 {
+		cmdArgs = args[1:]
+	}
+	cmd := exec.Command(execPath, cmdArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = env
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	os.Exit(0)
+	return nil
+}
+
 
 

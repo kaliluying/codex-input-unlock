@@ -2086,12 +2086,21 @@ func checkPreLaunchUpdate() bool {
 
 	fmt.Println("\n==================================================")
 	fmt.Printf("✓ 升级完成！已成功更新至最新版本 %s\n", tag)
-	fmt.Println("请重新启动即可享受最新版本。")
+	fmt.Println("正在为您自动重新启动并打开应用...")
 	fmt.Println("==================================================")
 
 	if runtime.GOOS == "darwin" {
-		alertScript := fmt.Sprintf(`display alert "Codex 解锁补丁已更新至 %s" message "更新已就绪，请重新点击启动！" as informational`, tag)
-		_ = exec.Command("osascript", "-e", alertScript).Run()
+		_ = exec.Command("osascript", "-e", fmt.Sprintf(`display notification "已成功更新至最新版本 %s，正在自动启动..." with title "Codex Input Unlock"`, tag)).Run()
+	}
+
+	execPath, err := os.Executable()
+	if err == nil {
+		if resolved, err := filepath.EvalSymlinks(execPath); err == nil {
+			execPath = resolved
+		}
+		if err := restartSelf(execPath, os.Args, os.Environ()); err != nil {
+			fmt.Fprintf(os.Stderr, "自动重启失败: %v。请重新运行命令启动。\n", err)
+		}
 	}
 	return true
 }
