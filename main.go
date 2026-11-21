@@ -122,15 +122,15 @@ func sourceLocation(source, sourceURL string, absoluteOffset int, quotaVar, host
 
 // conditionForLocation 为目标断点生成执行改写的 JS 条件表达式
 // 【原理精妙】：
-// 1. 我们利用 CDP 的 "条件断点" (Breakpoint Condition) 能力向当前 JS 执行栈注入代码。
-// 2. 利用 JavaScript 的“逗号操作符”特性：`(` + 表达式1 + `,` + 表达式2 + `)`。
-//    例如 `(quotaVar={}, false)`：
-//    - 前半部分 `quotaVar={}` 或 `quotaVar=false` 会在变量使用前将其改写为未封锁状态；
-//    - 最后一个操作数恒返回 `false`。
-// 3. 【为什么恒返回 false】：
-//    如果返回 true，浏览器会真正在该行停住暂停（Pause），导致整个应用界面卡死等待调试器。
-//    而返回 `false` 则会让 V8 引擎在“执行完修改副作用”后立即继续执行，完全不阻塞 UI，
-//    达到真正的“静默热重写内存变量”，普通用户在使用时完全无感知！
+//  1. 我们利用 CDP 的 "条件断点" (Breakpoint Condition) 能力向当前 JS 执行栈注入代码。
+//  2. 利用 JavaScript 的“逗号操作符”特性：`(` + 表达式1 + `,` + 表达式2 + `)`。
+//     例如 `(quotaVar={}, false)`：
+//     - 前半部分 `quotaVar={}` 或 `quotaVar=false` 会在变量使用前将其改写为未封锁状态；
+//     - 最后一个操作数恒返回 `false`。
+//  3. 【为什么恒返回 false】：
+//     如果返回 true，浏览器会真正在该行停住暂停（Pause），导致整个应用界面卡死等待调试器。
+//     而返回 `false` 则会让 V8 引擎在“执行完修改副作用”后立即继续执行，完全不阻塞 UI，
+//     达到真正的“静默热重写内存变量”，普通用户在使用时完全无感知！
 func conditionForLocation(loc *Location) string {
 	if loc == nil || !safeIdentRe.MatchString(loc.QuotaVariable) {
 		return ""
@@ -1232,7 +1232,7 @@ func collectQuotaScripts(session *CDPSession, timeout time.Duration, quietDurati
 		quiet := !lastFoundAt.IsZero() && time.Since(lastFoundAt) >= quietDuration
 		mu.Unlock()
 
-		if foundCount > 0 && pending == 0 && quiet {
+		if foundCount > 0 && pending == 0 && (quiet || quietDuration <= 0) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -1258,8 +1258,8 @@ func resolveBreakpointLocation(session *CDPSession, scriptID string, desired Loc
 		end := cdpLocation{ScriptID: scriptID, LineNumber: *desired.EndLineNumber, ColumnNumber: *desired.EndColumnNumber}
 
 		raw, err := session.Send("Debugger.getPossibleBreakpoints", map[string]any{
-			"start":               start,
-			"end":                 end,
+			"start":              start,
+			"end":                end,
 			"restrictToFunction": true,
 		}, 5*time.Second)
 		if err == nil {
@@ -1301,8 +1301,8 @@ func resolveBreakpointLocation(session *CDPSession, scriptID string, desired Loc
 		end := cdpLocation{ScriptID: scriptID, LineNumber: desired.LineNumber, ColumnNumber: desired.ColumnNumber + radius}
 
 		raw, err := session.Send("Debugger.getPossibleBreakpoints", map[string]any{
-			"start":               start,
-			"end":                 end,
+			"start":              start,
+			"end":                end,
 			"restrictToFunction": true,
 		}, 5*time.Second)
 		if err == nil {
@@ -1361,7 +1361,7 @@ func superviseTarget(ctx context.Context, target *cdpTarget, gateSource string, 
 		}
 	}()
 
-	scripts, err := collectQuotaScripts(session, 20*time.Second, 2*time.Second)
+	scripts, err := collectQuotaScripts(session, 20*time.Second, 0)
 	if err != nil {
 		return err
 	}
@@ -1557,10 +1557,10 @@ func isAppRunning(appPath string) bool {
 
 // runSupervise 负责 CDP 调试端口的生命周期维护与断点保活
 // 【关键特性】：
-// 1. Electron 桌面应用内，用户随时可能按 Cmd+R 刷新页面或切换工作区导致前端页面重建；
-// 2. 本守护循环会在连接断开或页面刷新后自动重新捕捉渲染目标并再次下发解锁断点；
-// 3. 【自动退出感知】：一旦检测到客户端已被用户完全关闭（isAppRunning 返回 false），
-//    守护循环会立即停止并退出，不留下任何后台驻留僵尸进程。
+//  1. Electron 桌面应用内，用户随时可能按 Cmd+R 刷新页面或切换工作区导致前端页面重建；
+//  2. 本守护循环会在连接断开或页面刷新后自动重新捕捉渲染目标并再次下发解锁断点；
+//  3. 【自动退出感知】：一旦检测到客户端已被用户完全关闭（isAppRunning 返回 false），
+//     守护循环会立即停止并退出，不留下任何后台驻留僵尸进程。
 func runSupervise(ctx context.Context, port int, gateFile, statusPath string, startupTimeout time.Duration, appPath string) error {
 	if appPath == "" {
 		appPath, _ = findAppPath()
@@ -1679,10 +1679,6 @@ func runSelfTest(bundlePath, gatePath string) error {
 
 // runLaunch 拉起桌面客户端并开启 CDP 守护进程（前台终端运行模式）
 func runLaunch(gatePath, statusPath string, debugPort int, startupTimeoutSec int, killExisting bool) error {
-	// 启动前检查新版本：一旦发现新版则更新且暂不拉起应用，更新完提示用户重新启动
-	if checkPreLaunchUpdate() {
-		return nil
-	}
 
 	appPath, err := findAppPath()
 	if err != nil {
@@ -1782,10 +1778,6 @@ func runLaunch(gatePath, statusPath string, debugPort int, startupTimeoutSec int
 // 4. 一旦确认断点注入成功，在控制台打印成功提示并向桌面发送系统通知，然后父进程退出（exit 0）；
 // 5. 终端窗口随之立即关闭，后台子进程继续保持静默守护，直到 ChatGPT 客户端被按 Cmd+Q 退出时自动关闭。
 func runLaunchDetached(gatePath, statusPath string, debugPort int, startupTimeoutSec int, killExisting bool) error {
-	// 启动前检查新版本：一旦发现新版则更新且暂不拉起应用，更新完提示用户重新启动
-	if checkPreLaunchUpdate() {
-		return nil
-	}
 
 	appPath, err := findAppPath()
 	if err != nil {
@@ -1867,6 +1859,9 @@ func runLaunchDetached(gatePath, statusPath string, debugPort int, startupTimeou
 
 	fmt.Println("✓ Codex / ChatGPT 已成功启动，输入框解锁补丁已生效！")
 	fmt.Println("✓ 守护程序已在后台运行（在您按 Cmd+Q 退出 ChatGPT 软件时会自动跟随关闭）。")
+
+	// 更新检查不挡启动。发现新版时下次启动生效，避免父进程和后台守护各查一次。
+	go checkPreLaunchUpdateAsync()
 
 	if runtime.GOOS == "darwin" {
 		_ = exec.Command("osascript", "-e", `display notification "ChatGPT 输入框已解锁就绪，退出软件时自动清理" with title "Codex Input Unlock"`).Run()
@@ -2065,52 +2060,32 @@ func downloadAndApplyUpdate(repo, tag string, foreground bool) error {
 	return nil
 }
 
-// checkPreLaunchUpdate 在拉起应用前快速检测是否有新版本。
-// 【产品逻辑】：一旦在后台发现新版，就立即下载更新且暂不启动应用，更新完成后提示用户重新启动。
-// 若无新版或检测超时（1.5 秒极速探测），返回 false 顺畅进入应用启动流程。
-func checkPreLaunchUpdate() bool {
-	repo := os.Getenv("CODEX_UNLOCK_RELEASE_REPO")
-	if repo == "" {
-		repo = "kaliluying/codex-input-unlock"
+func releaseRepo() string {
+	if repo := os.Getenv("CODEX_UNLOCK_RELEASE_REPO"); repo != "" {
+		return repo
 	}
-	tag, err := fetchLatestReleaseTag(repo, 1500*time.Millisecond)
+	return "kaliluying/codex-input-unlock"
+}
+
+// checkPreLaunchUpdateAsync 在启动成功后后台更新本地二进制。
+// 不重启正在运行的守护进程，新版本下次启动生效。
+func checkPreLaunchUpdateAsync() {
+	repo := releaseRepo()
+	tag, err := fetchLatestReleaseTag(repo, 3*time.Second)
 	if err != nil || !isNewerVersion(tag, appVersion) {
-		return false
+		return
 	}
-
-	fmt.Printf("发现新版本 %s (当前版本: v%s)，正在为您更新...\n", tag, appVersion)
-	if err := downloadAndApplyUpdate(repo, tag, true); err != nil {
-		fmt.Fprintf(os.Stderr, "自动更新失败: %v。将继续使用当前版本启动...\n", err)
-		return false
+	if err := downloadAndApplyUpdate(repo, tag, false); err != nil {
+		return
 	}
-
-	fmt.Println("\n==================================================")
-	fmt.Printf("✓ 升级完成！已成功更新至最新版本 %s\n", tag)
-	fmt.Println("正在为您自动重新启动并打开应用...")
-	fmt.Println("==================================================")
-
 	if runtime.GOOS == "darwin" {
-		_ = exec.Command("osascript", "-e", fmt.Sprintf(`display notification "已成功更新至最新版本 %s，正在自动启动..." with title "Codex Input Unlock"`, tag)).Run()
+		_ = exec.Command("osascript", "-e", fmt.Sprintf(`display notification "已更新至 %s，下次启动生效" with title "Codex Input Unlock"`, tag)).Run()
 	}
-
-	execPath, err := os.Executable()
-	if err == nil {
-		if resolved, err := filepath.EvalSymlinks(execPath); err == nil {
-			execPath = resolved
-		}
-		if err := restartSelf(execPath, os.Args, os.Environ()); err != nil {
-			fmt.Fprintf(os.Stderr, "自动重启失败: %v。请重新运行命令启动。\n", err)
-		}
-	}
-	return true
 }
 
 // runUpdate 手动检查并执行在线升级
 func runUpdate() error {
-	repo := os.Getenv("CODEX_UNLOCK_RELEASE_REPO")
-	if repo == "" {
-		repo = "kaliluying/codex-input-unlock"
-	}
+	repo := releaseRepo()
 	fmt.Printf("当前版本: v%s\n", appVersion)
 	fmt.Printf("正在检查 %s 的最新发布版本...\n", repo)
 	tag, err := fetchLatestReleaseTag(repo, 5*time.Second)
